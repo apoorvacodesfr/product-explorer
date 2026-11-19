@@ -1,4 +1,4 @@
-// app.js — UI rendering, filtering, sorting and cart state.
+// app.js — product rendering, search, filters, sorting and shopping bag.
 import { fetchProducts, fetchCategories } from "./api.js";
 import { loadCart, saveCart, loadPreferences, savePreferences } from "./storage.js";
 
@@ -30,17 +30,23 @@ let activeCategory = preferences.category;
 let searchTerm = "";
 let sortMode = preferences.sort;
 let toastTimer;
+let toastMessage = "";
 
-const money = value => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(value);
-const escapeHTML = value => String(value).replace(/[&<>"']/g, char => ({
+const money = value => new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD"
+}).format(Number(value) || 0);
+
+const escapeHTML = value => String(value ?? "").replace(/[&<>"']/g, char => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
 }[char]));
 
 function showToast(message) {
+  toastMessage = message;
   elements.toast.textContent = message;
   elements.toast.classList.add("show");
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => elements.toast.classList.remove("show"), 1900);
+  toastTimer = setTimeout(() => elements.toast.classList.remove("show"), 2100);
 }
 
 function setLoading(isLoading) {
@@ -57,82 +63,111 @@ function showError(message) {
 async function initialise() {
   setLoading(true);
   elements.error.hidden = true;
+  elements.retry.disabled = true;
+
   try {
-    // Fetch products and categories asynchronously from the public API.
-    const [productData, categoryData] = await Promise.all([fetchProducts(), fetchCategories()]);
+    const [productData, categoryData] = await Promise.all([
+      fetchProducts(),
+      fetchCategories()
+    ]);
+
     products = productData;
+    if (!products.length) throw new Error("There are no products to display right now.");
+
+    if (!categoryData.includes(activeCategory)) activeCategory = "all";
     renderCategories(categoryData);
     elements.sort.value = sortMode;
-    elements.tabs.querySelectorAll(".category-tab").forEach(button => {
-      button.classList.toggle("active", button.dataset.category === activeCategory);
-    });
+    updateActiveTab();
     renderProducts();
+    updateCartCount();
   } catch (error) {
-    console.error("Initial data load failed:", error);
-    showError("Please check your internet connection. The product service may also be temporarily unavailable.");
+    console.error("Shoply could not load its data:", error);
+    showError(error.message || "Please check your internet connection and try again.");
     elements.count.textContent = "Collection unavailable";
   } finally {
     setLoading(false);
+    elements.retry.disabled = false;
   }
 }
 
 function renderCategories(categories) {
-  const allButton = '<button class="category-tab" data-category="all" type="button">All items</button>';
-  elements.tabs.innerHTML = allButton + categories.map(category =>
-    `<button class="category-tab" data-category="${escapeHTML(category)}" type="button">${escapeHTML(category)}</button>`
-  ).join("");
-  elements.tabs.querySelectorAll(".category-tab").forEach(button => {
-    button.addEventListener("click", () => {
-      activeCategory = button.dataset.category;
-      saveCurrentPreferences();
-      updateActiveTab();
-      renderProducts();
-    });
-  });
+  const allButton = '<button class="category-tab" data-category="all" type="button">Everything</button>';
+  elements.tabs.innerHTML = allButton + categories.map(category => {
+    const safeCategory = escapeHTML(category);
+    return `<button class="category-tab" data-category="${safeCategory}" type="button">${safeCategory}</button>`;
+  }).join("");
 }
 
 function updateActiveTab() {
   elements.tabs.querySelectorAll(".category-tab").forEach(button => {
-    button.classList.toggle("active", button.dataset.category === activeCategory);
+    const isActive = button.dataset.category === activeCategory;
+    button.classList.toggle("active", isActive);
+    button.setAttribute("aria-pressed", String(isActive));
   });
 }
 
 function getVisibleProducts() {
   let result = [...products];
-  if (activeCategory !== "all") result = result.filter(product => product.category === activeCategory);
+
+  if (activeCategory !== "all") {
+    result = result.filter(product => product.category === activeCategory);
+  }
+
   if (searchTerm) {
     result = result.filter(product =>
-      `${product.title} ${product.description} ${product.category}`.toLowerCase().includes(searchTerm)
+      `${product.title} ${product.description} ${product.category}`
+        .toLowerCase()
+        .includes(searchTerm)
     );
   }
+
   switch (sortMode) {
-    case "price-low": result.sort((a, b) => a.price - b.price); break;
-    case "price-high": result.sort((a, b) => b.price - a.price); break;
-    case "rating": result.sort((a, b) => b.rating.rate - a.rating.rate); break;
-    case "name": result.sort((a, b) => a.title.localeCompare(b.title)); break;
-    default: result.sort((a, b) => a.id - b.id);
+    case "price-low":
+      result.sort((a, b) => a.price - b.price);
+      break;
+    case "price-high":
+      result.sort((a, b) => b.price - a.price);
+      break;
+    case "rating":
+      result.sort((a, b) => b.rating.rate - a.rating.rate);
+      break;
+    case "name":
+      result.sort((a, b) => a.title.localeCompare(b.title));
+      break;
+    default:
+      result.sort((a, b) => a.id - b.id);
   }
+
   return result;
 }
 
 function renderProducts() {
   const visible = getVisibleProducts();
-  elements.count.textContent = `${visible.length} ${visible.length === 1 ? "item" : "items"} found`;
-  elements.grid.innerHTML = visible.map(product => `
-    <article class="product-card">
-      <div class="product-image-wrap">
-        <span class="product-category">${escapeHTML(product.category)}</span>
-        <img class="product-image" src="${escapeHTML(product.image)}" alt="${escapeHTML(product.title)}" loading="lazy">
-      </div>
-      <div class="product-info">
-        <h3 class="product-title" title="${escapeHTML(product.title)}">${escapeHTML(product.title)}</h3>
-        <div class="product-rating" aria-label="${product.rating.rate} out of 5 stars">★ ${product.rating.rate} <span>(${product.rating.count} reviews)</span></div>
-        <div class="product-bottom">
-          <strong class="product-price">${money(product.price)}</strong>
-          <button class="add-button" data-add="${product.id}" type="button">+ Add</button>
+  elements.count.textContent = `${visible.length} ${visible.length === 1 ? "find" : "finds"} to explore`;
+
+  elements.grid.innerHTML = visible.map(product => {
+    const rating = product.rating.rate.toFixed(1);
+    const image = product.image
+      ? `<img class="product-image" src="${escapeHTML(product.image)}" alt="${escapeHTML(product.title)}" loading="lazy">`
+      : '<span class="image-fallback" aria-hidden="true">✳</span>';
+
+    return `
+      <article class="product-card">
+        <div class="product-image-wrap">
+          <span class="product-category">${escapeHTML(product.category)}</span>
+          ${image}
         </div>
-      </div>
-    </article>`).join("");
+        <div class="product-info">
+          <h3 class="product-title" title="${escapeHTML(product.title)}">${escapeHTML(product.title)}</h3>
+          <div class="product-rating" aria-label="${rating} out of 5 stars">★ ${rating} <span>(${product.rating.count} reviews)</span></div>
+          <div class="product-bottom">
+            <strong class="product-price">${money(product.price)}</strong>
+            <button class="add-button" data-add="${product.id}" type="button">+ Add to bag</button>
+          </div>
+        </div>
+      </article>`;
+  }).join("");
+
   elements.empty.hidden = visible.length !== 0;
   elements.grid.hidden = visible.length === 0;
 }
@@ -142,35 +177,70 @@ function saveCurrentPreferences() {
 }
 
 function addToCart(productId) {
+  const product = products.find(item => item.id === productId);
+  if (!product) return;
+
   const existing = cart.find(item => item.id === productId);
-  if (existing) existing.quantity += 1;
-  else cart.push({ id: productId, quantity: 1 });
+  if (existing) {
+    existing.quantity = Math.min(existing.quantity + 1, 99);
+  } else {
+    cart.push({ id: productId, quantity: 1 });
+  }
+
   saveCart(cart);
   updateCartCount();
-  const product = products.find(item => item.id === productId);
-  showToast(`${product.title} added to your bag`);
+  showToast("A good find. Added to your bag!");
 }
 
 function updateCartCount() {
-  elements.cartCount.textContent = cart.reduce((total, item) => total + item.quantity, 0);
+  const count = cart.reduce((total, item) => total + item.quantity, 0);
+  elements.cartCount.textContent = count > 99 ? "99+" : String(count);
+  elements.cartButton.setAttribute("aria-label", `Open shopping bag, ${count} items`);
+}
+
+function changeQuantity(productId, change) {
+  const item = cart.find(entry => entry.id === productId);
+  if (!item) return;
+
+  item.quantity += change;
+  if (item.quantity <= 0) {
+    cart = cart.filter(entry => entry.id !== productId);
+  } else {
+    item.quantity = Math.min(item.quantity, 99);
+  }
+
+  saveCart(cart);
+  updateCartCount();
+  renderCart();
 }
 
 function renderCart() {
-  if (cart.length === 0) {
-    elements.cartItems.innerHTML = '<p class="cart-empty">Your bag is looking a little empty.</p>';
-    elements.subtotal.textContent = money(0);
-    return;
-  }
   const cartProducts = cart.map(item => {
     const product = products.find(entry => entry.id === item.id);
     return product ? { ...product, quantity: item.quantity } : null;
   }).filter(Boolean);
+
+  if (!cartProducts.length) {
+    elements.cartItems.innerHTML = '<p class="cart-empty">Your bag is looking a little empty. Find something you love.</p>';
+    elements.subtotal.textContent = money(0);
+    return;
+  }
+
   elements.cartItems.innerHTML = cartProducts.map(item => `
     <div class="cart-item">
       <img src="${escapeHTML(item.image)}" alt="">
-      <div class="cart-item-info"><strong>${escapeHTML(item.title)}</strong><span>${item.quantity} × ${money(item.price)}</span></div>
+      <div class="cart-item-info">
+        <strong>${escapeHTML(item.title)}</strong>
+        <span>${money(item.price)} each</span>
+        <div class="quantity-controls" aria-label="Quantity controls">
+          <button data-change="-1" data-id="${item.id}" type="button" aria-label="Decrease quantity">−</button>
+          <span>${item.quantity}</span>
+          <button data-change="1" data-id="${item.id}" type="button" aria-label="Increase quantity">+</button>
+        </div>
+      </div>
       <button class="remove-item" data-remove="${item.id}" type="button">Remove</button>
     </div>`).join("");
+
   const total = cartProducts.reduce((sum, item) => sum + item.price * item.quantity, 0);
   elements.subtotal.textContent = money(total);
 }
@@ -183,6 +253,15 @@ elements.search.addEventListener("input", event => {
 elements.sort.addEventListener("change", event => {
   sortMode = event.target.value;
   saveCurrentPreferences();
+  renderProducts();
+});
+
+elements.tabs.addEventListener("click", event => {
+  const button = event.target.closest("[data-category]");
+  if (!button) return;
+  activeCategory = button.dataset.category;
+  saveCurrentPreferences();
+  updateActiveTab();
   renderProducts();
 });
 
@@ -208,16 +287,25 @@ elements.cartButton.addEventListener("click", () => {
   elements.cartDialog.showModal();
 });
 elements.closeCart.addEventListener("click", () => elements.cartDialog.close());
+
 elements.cartDialog.addEventListener("click", event => {
   if (event.target === elements.cartDialog) elements.cartDialog.close();
 });
+
 elements.cartItems.addEventListener("click", event => {
-  const button = event.target.closest("[data-remove]");
-  if (!button) return;
-  cart = cart.filter(item => item.id !== Number(button.dataset.remove));
-  saveCart(cart);
-  updateCartCount();
-  renderCart();
+  const removeButton = event.target.closest("[data-remove]");
+  if (removeButton) {
+    cart = cart.filter(item => item.id !== Number(removeButton.dataset.remove));
+    saveCart(cart);
+    updateCartCount();
+    renderCart();
+    return;
+  }
+
+  const quantityButton = event.target.closest("[data-change]");
+  if (quantityButton) {
+    changeQuantity(Number(quantityButton.dataset.id), Number(quantityButton.dataset.change));
+  }
 });
 
 document.addEventListener("keydown", event => {
